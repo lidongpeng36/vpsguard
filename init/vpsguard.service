@@ -1,0 +1,36 @@
+[Unit]
+Description=VPSGuard - GeoIP-based VPS Protection
+Documentation=https://github.com/lidongpeng36/vpsguard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpsguard -config /etc/vpsguard/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+# Directories
+RuntimeDirectory=vpsguard
+StateDirectory=vpsguard
+LogsDirectory=vpsguard
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vpsguard /var/log/vpsguard /tmp
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=no
+
+# Need CAP_NET_ADMIN for nftables management
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

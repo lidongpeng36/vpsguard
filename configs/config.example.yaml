@@ -1,0 +1,68 @@
+# VPSGuard Configuration
+# =====================
+# Copy to /etc/vpsguard/config.yaml and edit.
+
+# Protection mode:
+#   "blocklist" - block listed countries, allow everything else
+#   "allowlist" - allow only listed countries, block everything else
+mode: blocklist
+
+# Country list (ISO 3166-1 alpha-2 codes)
+# Blocklist mode: these countries will be blocked
+# Allowlist mode: only these countries will be allowed
+countries:
+  - CN
+  - RU
+  - KP
+  - IR
+
+# IP/CIDR whitelist - always allowed regardless of mode
+# Supports both IPv4 and IPv6
+whitelist:
+  # Your management IP
+  # - 1.2.3.4
+  # Private networks
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  # IPv6 loopback
+  - "::1"
+
+# GeoIP data source (MaxMind GeoLite2)
+geoip:
+  # Get a free license key at: https://www.maxmind.com/en/geolite2/signup
+  license_key: "YOUR_MAXMIND_LICENSE_KEY"
+  edition: "GeoLite2-Country-CSV"
+  # Update interval (MaxMind updates Tue/Fri, 48-72h is recommended)
+  update_interval: 48h
+  # Local storage for GeoIP data
+  data_dir: /var/lib/vpsguard/geoip
+
+# nftables configuration
+nftables:
+  # Table name (must not conflict with existing tables)
+  table_name: vpsguard
+  # Hook priority (-1 = before default input chain)
+  priority: -1
+
+# Logging
+log:
+  # Log level: debug, info, warn, error
+  level: info
+  # Log file path (empty = stderr, managed by systemd journal)
+  file: ""
+  # Max log file size in MB (only if file is set)
+  max_size_mb: 100
+  # Max number of log file backups
+  max_backups: 3
+
+# Daemon behavior
+daemon:
+  # Remove nftables rules when daemon stops
+  # true  = VPS unprotected when daemon is down
+  # false = rules persist until next daemon start (safer for reboots)
+  cleanup_on_stop: true
+  # Wait for GeoIP data before accepting connections
+  # true  = more secure startup, but slower
+  # false = start fast, load rules asynchronously
+  block_until_ready: false
