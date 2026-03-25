@@ -142,15 +142,19 @@ func runStatus(configPath string) {
 	fmt.Println("VPSGuard Status")
 	fmt.Println("===============")
 
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+	statsPath := config.Defaults().StatsPath()
+	cfg, cfgErr := config.Load(configPath)
+	if cfgErr == nil {
+		statsPath = cfg.StatsPath()
 	}
 
-	state, err := stats.Load(cfg.StatsPath())
+	state, err := stats.Load(statsPath)
 	if err != nil {
-		fmt.Printf("Status file: unavailable (%v)\n", err)
+		if cfgErr != nil {
+			fmt.Printf("Status file: unavailable (%v); config load also failed: %v\n", err, cfgErr)
+		} else {
+			fmt.Printf("Status file: unavailable (%v)\n", err)
+		}
 		return
 	}
 
@@ -172,6 +176,7 @@ func runStatus(configPath string) {
 	if state.Status.LastError != "" {
 		fmt.Printf("Last error: %s\n", state.Status.LastError)
 	}
+	fmt.Printf("Status file: %s\n", statsPath)
 
 	fmt.Println()
 	fmt.Println("Drop Stats")
