@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
