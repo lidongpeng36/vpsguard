@@ -248,7 +248,7 @@ func (m *Manager) Apply(params *RulesetParams) error {
 		return fmt.Errorf("creating sets: %w", err)
 	}
 
-	m.addRules(conn, table, chain, params.Mode)
+	m.addRules(conn, table, chain, params)
 
 	if err := conn.Flush(); err != nil {
 		return fmt.Errorf("flushing table structure: %w", err)
@@ -284,7 +284,6 @@ func (m *Manager) addManagedSets(conn *nftables.Conn, table *nftables.Table, par
 	if err := conn.AddSet(newAddrSet(table, geoV6Name, nftables.TypeIP6Addr), nil); err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -340,22 +339,22 @@ func (m *Manager) addSetElementsInBatches(name string, dataType nftables.SetData
 	return nil
 }
 
-func (m *Manager) addRules(conn *nftables.Conn, table *nftables.Table, chain *nftables.Chain, mode string) {
+func (m *Manager) addRules(conn *nftables.Conn, table *nftables.Table, chain *nftables.Chain, params *RulesetParams) {
 	conn.AddRule(ruleEstablishedRelated(table, chain))
 	conn.AddRule(ruleLoopback(table, chain))
-	conn.AddRule(ruleLookupV4(table, chain, "whitelist_v4", nil, expr.VerdictAccept))
-	conn.AddRule(ruleLookupV6(table, chain, "whitelist_v6", nil, expr.VerdictAccept))
+	conn.AddRule(ruleLookupV4(table, chain, "whitelist_v4", nil, expr.VerdictAccept, false))
+	conn.AddRule(ruleLookupV6(table, chain, "whitelist_v6", nil, expr.VerdictAccept, false))
 
-	if mode == "blocklist" {
-		conn.AddRule(ruleLookupV4(table, chain, "blocked_v4", nil, expr.VerdictDrop))
-		conn.AddRule(ruleLookupV6(table, chain, "blocked_v6", nil, expr.VerdictDrop))
+	if params.Mode == "blocklist" {
+		conn.AddRule(tagRule(ruleLookupV4(table, chain, "blocked_v4", nil, expr.VerdictDrop, true), "TOTAL", "drop"))
+		conn.AddRule(tagRule(ruleLookupV6(table, chain, "blocked_v6", nil, expr.VerdictDrop, true), "TOTAL", "drop"))
 		return
 	}
 
 	newState := ctStateMatchExprs(expr.CtStateBitNEW)
-	conn.AddRule(ruleLookupV4(table, chain, "allowed_v4", newState, expr.VerdictAccept))
-	conn.AddRule(ruleLookupV6(table, chain, "allowed_v6", newState, expr.VerdictAccept))
-	conn.AddRule(ruleWithExprs(table, chain, append(newState, verdictExpr(expr.VerdictDrop))...))
+	conn.AddRule(ruleLookupV4(table, chain, "allowed_v4", newState, expr.VerdictAccept, false))
+	conn.AddRule(ruleLookupV6(table, chain, "allowed_v6", newState, expr.VerdictAccept, false))
+	conn.AddRule(tagRule(ruleWithExprs(table, chain, append(newState, counterExpr(), verdictExpr(expr.VerdictDrop))...), "TOTAL", "drop"))
 }
 
 func newAddrSet(table *nftables.Table, name string, dataType nftables.SetDatatype) *nftables.Set {
@@ -388,8 +387,8 @@ func ruleLoopback(table *nftables.Table, chain *nftables.Chain) *nftables.Rule {
 	)
 }
 
-func ruleLookupV4(table *nftables.Table, chain *nftables.Chain, setName string, prefix []expr.Any, verdict expr.VerdictKind) *nftables.Rule {
-	exprs := make([]expr.Any, 0, len(prefix)+3)
+func ruleLookupV4(table *nftables.Table, chain *nftables.Chain, setName string, prefix []expr.Any, verdict expr.VerdictKind, withCounter bool) *nftables.Rule {
+	exprs := make([]expr.Any, 0, len(prefix)+4)
 	exprs = append(exprs, prefix...)
 	exprs = append(exprs,
 		&expr.Payload{
@@ -403,13 +402,16 @@ func ruleLookupV4(table *nftables.Table, chain *nftables.Chain, setName string, 
 			SourceRegister: reg1,
 			SetName:        setName,
 		},
-		verdictExpr(verdict),
 	)
+	if withCounter {
+		exprs = append(exprs, counterExpr())
+	}
+	exprs = append(exprs, verdictExpr(verdict))
 	return ruleWithExprs(table, chain, exprs...)
 }
 
-func ruleLookupV6(table *nftables.Table, chain *nftables.Chain, setName string, prefix []expr.Any, verdict expr.VerdictKind) *nftables.Rule {
-	exprs := make([]expr.Any, 0, len(prefix)+3)
+func ruleLookupV6(table *nftables.Table, chain *nftables.Chain, setName string, prefix []expr.Any, verdict expr.VerdictKind, withCounter bool) *nftables.Rule {
+	exprs := make([]expr.Any, 0, len(prefix)+4)
 	exprs = append(exprs, prefix...)
 	exprs = append(exprs,
 		&expr.Payload{
@@ -423,8 +425,11 @@ func ruleLookupV6(table *nftables.Table, chain *nftables.Chain, setName string, 
 			SourceRegister: reg1,
 			SetName:        setName,
 		},
-		verdictExpr(verdict),
 	)
+	if withCounter {
+		exprs = append(exprs, counterExpr())
+	}
+	exprs = append(exprs, verdictExpr(verdict))
 	return ruleWithExprs(table, chain, exprs...)
 }
 
@@ -438,6 +443,10 @@ func ruleWithExprs(table *nftables.Table, chain *nftables.Chain, exprs ...expr.A
 
 func verdictExpr(kind expr.VerdictKind) *expr.Verdict {
 	return &expr.Verdict{Kind: kind}
+}
+
+func counterExpr() *expr.Counter {
+	return &expr.Counter{}
 }
 
 func ctStateMatchExprs(mask uint32) []expr.Any {
@@ -469,6 +478,11 @@ func ifName(name string) []byte {
 
 func chainPolicyRef(p nftables.ChainPolicy) *nftables.ChainPolicy {
 	return &p
+}
+
+func tagRule(rule *nftables.Rule, country, action string) *nftables.Rule {
+	rule.UserData = []byte("vpsguard|" + action + "|" + strings.ToUpper(country))
+	return rule
 }
 
 // Cleanup removes the VPSGuard table from nftables.
@@ -516,6 +530,49 @@ func (m *Manager) Verify() error {
 	return nil
 }
 
+// DropCounters returns cumulative drop packet counters by country code.
+func (m *Manager) DropCounters() (map[string]uint64, error) {
+	conn := &nftables.Conn{}
+
+	table, err := conn.ListTableOfFamily(m.TableName, nftables.TableFamilyINet)
+	if err != nil {
+		return nil, fmt.Errorf("listing table: %w", err)
+	}
+	if table == nil {
+		return nil, fmt.Errorf("table %s not found", m.TableName)
+	}
+
+	chain, err := conn.ListChain(table, "input")
+	if err != nil {
+		return nil, fmt.Errorf("listing input chain: %w", err)
+	}
+	if chain == nil {
+		return nil, fmt.Errorf("table %s exists but missing input chain", m.TableName)
+	}
+
+	rules, err := conn.GetRules(table, chain)
+	if err != nil {
+		return nil, fmt.Errorf("listing rules: %w", err)
+	}
+
+	counters := make(map[string]uint64)
+	for _, rule := range rules {
+		country, action, ok := parseRuleTag(rule.UserData)
+		if !ok || action != "drop" {
+			continue
+		}
+		for _, anyExpr := range rule.Exprs {
+			counter, ok := anyExpr.(*expr.Counter)
+			if !ok {
+				continue
+			}
+			counters[country] += counter.Packets
+		}
+	}
+
+	return counters, nil
+}
+
 func isNotFoundErr(err error) bool {
 	if err == nil {
 		return false
@@ -525,6 +582,14 @@ func isNotFoundErr(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "no such file") || strings.Contains(msg, "not found")
+}
+
+func parseRuleTag(data []byte) (country, action string, ok bool) {
+	parts := strings.Split(string(data), "|")
+	if len(parts) != 3 || parts[0] != "vpsguard" {
+		return "", "", false
+	}
+	return parts[2], parts[1], true
 }
 
 // DryRun generates the full ruleset and writes it to the given path (or stdout).

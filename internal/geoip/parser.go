@@ -170,9 +170,12 @@ func ParseBlocks(r io.Reader, locations map[string]string, targetCountries map[s
 //   - GeoLite2-Country-Blocks-IPv6.csv
 func LoadFromDir(dir string, countries []string) (*CountryCIDRs, error) {
 	// Build target set
-	targetSet := make(map[string]bool, len(countries))
-	for _, c := range countries {
-		targetSet[strings.ToUpper(c)] = true
+	var targetSet map[string]bool
+	if countries != nil {
+		targetSet = make(map[string]bool, len(countries))
+		for _, c := range countries {
+			targetSet[strings.ToUpper(c)] = true
+		}
 	}
 
 	// Parse locations

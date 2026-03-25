@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,13 +32,13 @@ const (
 
 // Config is the top-level configuration structure.
 type Config struct {
-	Mode      Mode      `yaml:"mode"`
-	Countries []string  `yaml:"countries"`
-	Whitelist []string  `yaml:"whitelist"`
-	GeoIP     GeoIP     `yaml:"geoip"`
-	NFTables  NFTables  `yaml:"nftables"`
-	Log       Log       `yaml:"log"`
-	Daemon    Daemon    `yaml:"daemon"`
+	Mode      Mode     `yaml:"mode"`
+	Countries []string `yaml:"countries"`
+	Whitelist []string `yaml:"whitelist"`
+	GeoIP     GeoIP    `yaml:"geoip"`
+	NFTables  NFTables `yaml:"nftables"`
+	Log       Log      `yaml:"log"`
+	Daemon    Daemon   `yaml:"daemon"`
 }
 
 // GeoIP configures the MaxMind GeoIP data source.
@@ -184,6 +185,12 @@ func (c *Config) Validate() error {
 func (c *Config) UpdateIntervalDuration() time.Duration {
 	d, _ := time.ParseDuration(c.GeoIP.UpdateInterval)
 	return d
+}
+
+// StatsPath returns the path used to persist rolling firewall statistics.
+func (c *Config) StatsPath() string {
+	baseDir := filepath.Dir(c.GeoIP.DataDir)
+	return filepath.Join(baseDir, "stats.json")
 }
 
 // ParsedWhitelist returns the whitelist entries as parsed netip.Prefix values.

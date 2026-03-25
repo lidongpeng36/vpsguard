@@ -18,11 +18,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/lidongpeng36/vpsguard/internal/config"
 	"github.com/lidongpeng36/vpsguard/internal/daemon"
 	"github.com/lidongpeng36/vpsguard/internal/firewall"
 	"github.com/lidongpeng36/vpsguard/internal/geoip"
+	"github.com/lidongpeng36/vpsguard/internal/stats"
 	"github.com/lidongpeng36/vpsguard/internal/updater"
 )
 
@@ -56,7 +58,7 @@ func main() {
 	}
 
 	if *showStatus {
-		runStatus()
+		runStatus(*configPath)
 		return
 	}
 
@@ -136,17 +138,69 @@ func runDryRun(configPath string) {
 }
 
 // runStatus shows current nftables table status.
-func runStatus() {
+func runStatus(configPath string) {
 	fmt.Println("VPSGuard Status")
 	fmt.Println("===============")
 
-	// Try to list the table
-	fw := firewall.NewManager("vpsguard", 0)
-	if err := fw.Verify(); err != nil {
-		fmt.Printf("Table status: NOT ACTIVE (%v)\n", err)
-	} else {
-		fmt.Println("Table status: ACTIVE")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
 	}
+
+	state, err := stats.Load(cfg.StatsPath())
+	if err != nil {
+		fmt.Printf("Status file: unavailable (%v)\n", err)
+		return
+	}
+
+	if state.Status.Active {
+		fmt.Println("Table status: ACTIVE")
+	} else {
+		fmt.Println("Table status: NOT ACTIVE")
+	}
+	fmt.Printf("Mode: %s\n", state.Status.Mode)
+	fmt.Printf("Countries: %v\n", state.Status.Countries)
+	fmt.Printf("Whitelist entries: %d\n", state.Status.WhitelistCount)
+	fmt.Printf("Table: %s\n", state.Status.TableName)
+	if !state.Status.LastUpdate.IsZero() {
+		fmt.Printf("Last GeoIP update: %s\n", state.Status.LastUpdate.Format(time.RFC3339))
+	}
+	if !state.Status.LastSample.IsZero() {
+		fmt.Printf("Last stats sample: %s\n", state.Status.LastSample.Format(time.RFC3339))
+	}
+	if state.Status.LastError != "" {
+		fmt.Printf("Last error: %s\n", state.Status.LastError)
+	}
+
+	fmt.Println()
+	fmt.Println("Drop Stats")
+	fmt.Println("----------")
+	report := stats.ReportFromState(state)
+	for _, window := range report.Windows {
+		fmt.Printf("%s: %d\n", formatWindow(window.Window), sumCounters(window.Counters))
+	}
+}
+
+func formatWindow(d time.Duration) string {
+	switch d {
+	case time.Hour:
+		return "Last 1h"
+	case 24 * time.Hour:
+		return "Last 24h"
+	case 7 * 24 * time.Hour:
+		return "Last 7d"
+	default:
+		return d.String()
+	}
+}
+
+func sumCounters(counters map[string]uint64) uint64 {
+	var total uint64
+	for _, count := range counters {
+		total += count
+	}
+	return total
 }
 
 // runDaemon starts the main daemon process.

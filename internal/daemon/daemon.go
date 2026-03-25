@@ -76,6 +76,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Start periodic update in background
 	go d.updater.RunSchedule(ctx)
+	go d.updater.RunStatsSampler(ctx)
 
 	// Enter signal loop
 	d.signalLoop(ctx)
@@ -153,20 +154,26 @@ func (d *Daemon) handleForceUpdate(ctx context.Context) {
 // shutdown performs graceful cleanup on daemon exit.
 func (d *Daemon) shutdown() error {
 	d.logger.Info("shutting down")
+	var shutdownErr error
 
 	if d.cfg.Daemon.CleanupOnStop {
 		d.logger.Info("cleaning up nftables rules")
 		if err := d.updater.Cleanup(); err != nil {
 			d.logger.Error("cleanup failed", "error", err)
-			return err
+			shutdownErr = err
+		} else {
+			d.logger.Info("nftables rules cleaned up")
 		}
-		d.logger.Info("nftables rules cleaned up")
 	} else {
 		d.logger.Info("keeping nftables rules (cleanup_on_stop=false)")
 	}
 
+	if err := d.updater.WriteStoppedStatus(shutdownErr); err != nil {
+		d.logger.Warn("failed to persist stopped status", "error", err)
+	}
+
 	d.logger.Info("vpsguard stopped")
-	return nil
+	return shutdownErr
 }
 
 // Stop cancels the daemon context, triggering shutdown.

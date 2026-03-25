@@ -12,16 +12,18 @@ import (
 	"github.com/lidongpeng36/vpsguard/internal/config"
 	"github.com/lidongpeng36/vpsguard/internal/firewall"
 	"github.com/lidongpeng36/vpsguard/internal/geoip"
+	"github.com/lidongpeng36/vpsguard/internal/stats"
 )
 
 // Updater manages the periodic GeoIP update cycle.
 type Updater struct {
-	cfg     *config.Config
-	dl      *geoip.Downloader
-	fw      *firewall.Manager
-	logger  *slog.Logger
+	cfg            *config.Config
+	dl             *geoip.Downloader
+	fw             *firewall.Manager
+	statsCollector *stats.Collector
+	logger         *slog.Logger
 
-	mu       sync.Mutex
+	mu         sync.Mutex
 	lastUpdate time.Time
 	lastErr    error
 	cidrs      *geoip.CountryCIDRs
@@ -32,22 +34,26 @@ func New(cfg *config.Config, logger *slog.Logger) *Updater {
 	dl := geoip.NewDownloader(cfg.GeoIP.LicenseKey, cfg.GeoIP.Edition, cfg.GeoIP.DataDir)
 	fw := firewall.NewManager(cfg.NFTables.TableName, cfg.NFTables.Priority)
 
-	return &Updater{
+	u := &Updater{
 		cfg:    cfg,
 		dl:     dl,
 		fw:     fw,
 		logger: logger,
 	}
+	u.statsCollector = stats.New(cfg.StatsPath(), u)
+	return u
 }
 
 // NewWithDeps creates an Updater with explicit dependencies (for testing).
 func NewWithDeps(cfg *config.Config, dl *geoip.Downloader, fw *firewall.Manager, logger *slog.Logger) *Updater {
-	return &Updater{
+	u := &Updater{
 		cfg:    cfg,
 		dl:     dl,
 		fw:     fw,
 		logger: logger,
 	}
+	u.statsCollector = stats.New(cfg.StatsPath(), u)
+	return u
 }
 
 // Status returns the current updater status.
@@ -103,6 +109,9 @@ func (u *Updater) UpdateNow(ctx context.Context) error {
 		u.mu.Lock()
 		u.lastErr = err
 		u.mu.Unlock()
+		if writeErr := u.writeStatus(true, err.Error()); writeErr != nil {
+			u.logger.Warn("status snapshot update failed", "error", writeErr)
+		}
 		return fmt.Errorf("downloading GeoIP data: %w", err)
 	}
 
@@ -165,6 +174,10 @@ func (u *Updater) loadAndApply(dataDir string) error {
 	u.lastErr = nil
 	u.cidrs = cidrs
 	u.mu.Unlock()
+
+	if err := u.writeStatus(true, ""); err != nil {
+		u.logger.Warn("status snapshot update failed", "error", err)
+	}
 
 	u.logger.Info("firewall rules applied successfully")
 	return nil
@@ -234,6 +247,11 @@ func (u *Updater) Cleanup() error {
 	return u.fw.Cleanup()
 }
 
+// DropCounters returns current cumulative drop counters from the firewall.
+func (u *Updater) DropCounters() (map[string]uint64, error) {
+	return u.fw.DropCounters()
+}
+
 // Reload reloads config and reapplies rules with existing GeoIP data.
 func (u *Updater) Reload(cfg *config.Config) error {
 	u.mu.Lock()
@@ -242,9 +260,13 @@ func (u *Updater) Reload(cfg *config.Config) error {
 
 	u.cfg = cfg
 	u.fw = firewall.NewManager(cfg.NFTables.TableName, cfg.NFTables.Priority)
+	u.statsCollector = stats.New(cfg.StatsPath(), u)
 
 	if oldCIDRs != nil {
 		return u.loadAndApply(u.dl.CurrentDataDir())
+	}
+	if err := u.writeStatus(true, ""); err != nil {
+		return err
 	}
 	return nil
 }
@@ -254,7 +276,67 @@ func (u *Updater) FirewallManager() *firewall.Manager {
 	return u.fw
 }
 
+// StatsReport returns rolling drop statistics.
+func (u *Updater) StatsReport() (*stats.Report, error) {
+	return u.statsCollector.Report()
+}
+
+// SampleStats persists a current stats sample.
+func (u *Updater) SampleStats() error {
+	return u.statsCollector.Sample()
+}
+
+// WriteStoppedStatus marks the persisted status as inactive.
+func (u *Updater) WriteStoppedStatus(lastErr error) error {
+	msg := ""
+	if lastErr != nil {
+		msg = lastErr.Error()
+	}
+	return u.writeStatus(false, msg)
+}
+
 // BuildParamsFromData builds RulesetParams from existing data (for dry-run support).
 func (u *Updater) BuildParamsFromData(cidrs *geoip.CountryCIDRs) (*firewall.RulesetParams, error) {
 	return u.buildParams(cidrs)
+}
+
+// RunStatsSampler periodically snapshots nftables counters for rolling reports.
+func (u *Updater) RunStatsSampler(ctx context.Context) {
+	const interval = 5 * time.Minute
+
+	if err := u.SampleStats(); err != nil {
+		u.logger.Warn("initial stats sample failed", "error", err)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := u.SampleStats(); err != nil {
+				u.logger.Warn("stats sample failed", "error", err)
+			} else if err := u.writeStatus(true, ""); err != nil {
+				u.logger.Warn("status snapshot update failed", "error", err)
+			}
+		}
+	}
+}
+
+func (u *Updater) writeStatus(active bool, lastErr string) error {
+	u.mu.Lock()
+	lastUpdate := u.lastUpdate
+	u.mu.Unlock()
+
+	return u.statsCollector.UpdateStatus(stats.ServiceStatus{
+		Active:         active,
+		Mode:           string(u.cfg.Mode),
+		Countries:      append([]string(nil), u.cfg.Countries...),
+		TableName:      u.cfg.NFTables.TableName,
+		WhitelistCount: len(u.cfg.Whitelist),
+		LastUpdate:     lastUpdate,
+		LastError:      lastErr,
+	})
 }
