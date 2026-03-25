@@ -175,27 +175,27 @@ table inet vpsguard {
     set whitelist_v4 {
         type ipv4_addr
         flags interval
-        auto-merge
+        # auto-merge omitted for kernel compatibility
         elements = { 1.2.3.4, 10.0.0.0/8, 192.168.0.0/16 }
     }
 
     set whitelist_v6 {
         type ipv6_addr
         flags interval
-        auto-merge
+        # auto-merge omitted for kernel compatibility
     }
 
     set blocked_v4 {
         type ipv4_addr
         flags interval
-        auto-merge
+        # auto-merge omitted for kernel compatibility
         # 由 daemon 动态填充国家 CIDR
     }
 
     set blocked_v6 {
         type ipv6_addr
         flags interval
-        auto-merge
+        # auto-merge omitted for kernel compatibility
     }
 
     chain input {
@@ -230,14 +230,14 @@ table inet vpsguard {
     set allowed_v4 {
         type ipv4_addr
         flags interval
-        auto-merge
+        # auto-merge omitted for kernel compatibility
         # 放行国家的 CIDR
     }
 
     set allowed_v6 {
         type ipv6_addr
         flags interval
-        auto-merge
+        # auto-merge omitted for kernel compatibility
     }
 
     chain input {

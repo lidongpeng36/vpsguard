@@ -285,9 +285,45 @@ func TestTableNameCustom(t *testing.T) {
 	params := &RulesetParams{Mode: "blocklist"}
 	ruleset := m.GenerateRuleset(params)
 
-	mustContain(t, ruleset, "table inet my_custom_table")
+	mustContain(t, ruleset, "table inet my_custom_table {}")
 	mustContain(t, ruleset, "delete table inet my_custom_table")
 	mustContain(t, ruleset, "priority -5;")
+}
+
+func TestEnsureTableExistsBeforeDelete(t *testing.T) {
+	// Verify the "ensure exists → delete → recreate" pattern
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{Mode: "blocklist"}
+	ruleset := m.GenerateRuleset(params)
+
+	// The empty table declaration must come BEFORE the delete
+	posEnsure := strings.Index(ruleset, "table inet vpsguard {}")
+	posDelete := strings.Index(ruleset, "delete table inet vpsguard")
+	posCreate := strings.LastIndex(ruleset, "table inet vpsguard {")
+
+	if posEnsure == -1 {
+		t.Fatal("missing ensure-exists line: table inet vpsguard {}")
+	}
+	if posDelete == -1 {
+		t.Fatal("missing delete table line")
+	}
+	if posEnsure >= posDelete {
+		t.Error("ensure-exists must come BEFORE delete")
+	}
+	if posDelete >= posCreate {
+		t.Error("delete must come BEFORE the actual table creation")
+	}
+}
+
+func TestNoAutoMerge(t *testing.T) {
+	// auto-merge is omitted for older nftables/kernel compatibility
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{
+		Mode:  "blocklist",
+		GeoV4: []netip.Prefix{p("1.0.0.0/8")},
+	}
+	ruleset := m.GenerateRuleset(params)
+	mustNotContain(t, ruleset, "auto-merge")
 }
 
 func TestEstablishedRelatedFirst(t *testing.T) {

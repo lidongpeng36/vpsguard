@@ -46,7 +46,12 @@ func (m *Manager) GenerateRuleset(params *RulesetParams) string {
 	fmt.Fprintf(&buf, "# VPSGuard nftables ruleset - auto-generated\n")
 	fmt.Fprintf(&buf, "# Mode: %s\n\n", params.Mode)
 
-	// Delete existing table first (for atomic replace)
+	// Atomic table replacement:
+	// 1. Ensure table exists (no-op if already present, creates empty if not)
+	// 2. Delete it (guaranteed to succeed now)
+	// 3. Recreate with full ruleset
+	// This avoids "No such file or directory" on first run.
+	fmt.Fprintf(&buf, "table inet %s {}\n", m.TableName)
 	fmt.Fprintf(&buf, "delete table inet %s\n\n", m.TableName)
 
 	// Begin table
@@ -74,12 +79,12 @@ func (m *Manager) GenerateRuleset(params *RulesetParams) string {
 	return buf.String()
 }
 
-// writeSet writes an nftables set definition with interval/auto-merge flags.
+// writeSet writes an nftables set definition with interval flags.
+// Note: auto-merge is omitted for compatibility with older nftables/kernel versions.
 func (m *Manager) writeSet(buf *bytes.Buffer, name, addrType string, prefixes []netip.Prefix) {
 	fmt.Fprintf(buf, "    set %s {\n", name)
 	fmt.Fprintf(buf, "        type %s\n", addrType)
 	fmt.Fprintf(buf, "        flags interval\n")
-	fmt.Fprintf(buf, "        auto-merge\n")
 	if len(prefixes) > 0 {
 		fmt.Fprintf(buf, "        elements = { %s }\n", formatPrefixes(prefixes))
 	}
