@@ -143,15 +143,14 @@ func (u *Updater) loadAndApply(dataDir string) error {
 		return fmt.Errorf("building firewall params: %w", err)
 	}
 
-	// Generate and apply ruleset
-	ruleset := u.fw.GenerateRuleset(params)
+	// Apply ruleset in two phases (structure + batched elements)
 	u.logger.Info("applying nftables ruleset",
 		"mode", u.cfg.Mode,
 		"v4_prefixes", totalV4,
 		"v6_prefixes", totalV6,
 	)
 
-	if err := u.fw.Apply(ruleset); err != nil {
+	if err := u.fw.Apply(params); err != nil {
 		return fmt.Errorf("applying ruleset: %w", err)
 	}
 

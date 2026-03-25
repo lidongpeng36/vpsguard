@@ -12,7 +12,9 @@ func p(s string) netip.Prefix {
 	return netip.MustParsePrefix(s)
 }
 
-func TestGenerateRulesetBlocklist(t *testing.T) {
+// --- Structure generation tests ---
+
+func TestGenerateStructureBlocklist(t *testing.T) {
 	m := NewManager("vpsguard", -1)
 	params := &RulesetParams{
 		Mode: "blocklist",
@@ -23,97 +25,76 @@ func TestGenerateRulesetBlocklist(t *testing.T) {
 		WhitelistV6: []netip.Prefix{
 			p("::1/128"),
 		},
-		GeoV4: []netip.Prefix{
-			p("1.0.0.0/24"),
-			p("1.0.1.0/24"),
-		},
-		GeoV6: []netip.Prefix{
-			p("2001:200::/32"),
-		},
+		GeoV4: []netip.Prefix{p("1.0.0.0/24")}, // ignored in structure
 	}
 
-	ruleset := m.GenerateRuleset(params)
+	structure := m.GenerateStructure(params)
 
-	// Structure checks
-	mustContain(t, ruleset, "delete table inet vpsguard")
-	mustContain(t, ruleset, "table inet vpsguard {")
-	mustContain(t, ruleset, "set whitelist_v4 {")
-	mustContain(t, ruleset, "set whitelist_v6 {")
-	mustContain(t, ruleset, "set blocked_v4 {")
-	mustContain(t, ruleset, "set blocked_v6 {")
-	mustContain(t, ruleset, "chain input {")
+	// Table lifecycle
+	mustContain(t, structure, "table inet vpsguard {}")
+	mustContain(t, structure, "delete table inet vpsguard")
 
-	// Rule order checks
-	mustContain(t, ruleset, "ct state established,related accept")
-	mustContain(t, ruleset, "iif lo accept")
-	mustContain(t, ruleset, "ip saddr @whitelist_v4 accept")
-	mustContain(t, ruleset, "ip6 saddr @whitelist_v6 accept")
-	mustContain(t, ruleset, "ip saddr @blocked_v4 drop")
-	mustContain(t, ruleset, "ip6 saddr @blocked_v6 drop")
+	// Sets exist
+	mustContain(t, structure, "set whitelist_v4 {")
+	mustContain(t, structure, "set whitelist_v6 {")
+	mustContain(t, structure, "set blocked_v4 {")
+	mustContain(t, structure, "set blocked_v6 {")
 
-	// Set elements
-	mustContain(t, ruleset, "10.0.0.0/8")
-	mustContain(t, ruleset, "192.168.1.1/32")
-	mustContain(t, ruleset, "1.0.0.0/24")
+	// Whitelist elements are inline (small sets)
+	mustContain(t, structure, "10.0.0.0/8")
+	mustContain(t, structure, "192.168.1.1/32")
 
-	// Should NOT contain allowlist-specific rules
-	mustNotContain(t, ruleset, "allowed_v4")
-	mustNotContain(t, ruleset, "allowed_v6")
-	mustNotContain(t, ruleset, "ct state new drop")
+	// Geo elements are NOT inline (loaded in phase 2)
+	mustNotContain(t, structure, "1.0.0.0/24")
+
+	// Chain rules
+	mustContain(t, structure, "chain input {")
+	mustContain(t, structure, "ct state established,related accept")
+	mustContain(t, structure, "iif lo accept")
+	mustContain(t, structure, "ip saddr @whitelist_v4 accept")
+	mustContain(t, structure, "ip saddr @blocked_v4 drop")
+	mustContain(t, structure, "ip6 saddr @blocked_v6 drop")
+
+	// Should NOT contain allowlist-specific constructs
+	mustNotContain(t, structure, "allowed_v4")
+	mustNotContain(t, structure, "ct state new drop")
 }
 
-func TestGenerateRulesetAllowlist(t *testing.T) {
+func TestGenerateStructureAllowlist(t *testing.T) {
 	m := NewManager("vpsguard", -1)
 	params := &RulesetParams{
 		Mode: "allowlist",
 		WhitelistV4: []netip.Prefix{
 			p("192.168.0.0/16"),
 		},
-		WhitelistV6: nil,
-		GeoV4: []netip.Prefix{
-			p("8.8.8.0/24"),
-		},
-		GeoV6: []netip.Prefix{
-			p("2001:4860::/32"),
-		},
 	}
 
-	ruleset := m.GenerateRuleset(params)
+	structure := m.GenerateStructure(params)
 
-	// Should have allowlist sets, not blocklist
-	mustContain(t, ruleset, "set allowed_v4 {")
-	mustContain(t, ruleset, "set allowed_v6 {")
-	mustNotContain(t, ruleset, "blocked_v4")
-	mustNotContain(t, ruleset, "blocked_v6")
+	mustContain(t, structure, "set allowed_v4 {")
+	mustContain(t, structure, "set allowed_v6 {")
+	mustNotContain(t, structure, "blocked_v4")
 
-	// Allowlist-specific rules
-	mustContain(t, ruleset, "ct state new ip saddr @allowed_v4 accept")
-	mustContain(t, ruleset, "ct state new ip6 saddr @allowed_v6 accept")
-	mustContain(t, ruleset, "ct state new drop")
+	mustContain(t, structure, "ct state new ip saddr @allowed_v4 accept")
+	mustContain(t, structure, "ct state new ip6 saddr @allowed_v6 accept")
+	mustContain(t, structure, "ct state new drop")
 }
 
-func TestGenerateRulesetEmptySets(t *testing.T) {
+func TestGenerateStructureEmptySets(t *testing.T) {
 	m := NewManager("test_table", 0)
 	params := &RulesetParams{
-		Mode:        "blocklist",
-		WhitelistV4: nil,
-		WhitelistV6: nil,
-		GeoV4:       nil,
-		GeoV6:       nil,
+		Mode: "blocklist",
 	}
 
-	ruleset := m.GenerateRuleset(params)
+	structure := m.GenerateStructure(params)
 
-	// Sets should exist but be empty (no "elements" line)
-	mustContain(t, ruleset, "set whitelist_v4 {")
-	mustContain(t, ruleset, "set blocked_v4 {")
-
-	// Should still have the chain
-	mustContain(t, ruleset, "chain input {")
-	mustContain(t, ruleset, "ct state established,related accept")
+	mustContain(t, structure, "set whitelist_v4 {")
+	mustContain(t, structure, "set blocked_v4 {")
+	mustContain(t, structure, "chain input {")
+	mustContain(t, structure, "ct state established,related accept")
 }
 
-func TestGenerateRulesetPriority(t *testing.T) {
+func TestGenerateStructurePriority(t *testing.T) {
 	tests := []struct {
 		priority int
 		want     string
@@ -126,43 +107,53 @@ func TestGenerateRulesetPriority(t *testing.T) {
 		t.Run(tt.want, func(t *testing.T) {
 			m := NewManager("vpsguard", tt.priority)
 			params := &RulesetParams{Mode: "blocklist"}
-			ruleset := m.GenerateRuleset(params)
-			mustContain(t, ruleset, tt.want)
+			mustContain(t, m.GenerateStructure(params), tt.want)
 		})
 	}
 }
 
+func TestEnsureTableExistsBeforeDelete(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{Mode: "blocklist"}
+	structure := m.GenerateStructure(params)
+
+	posEnsure := strings.Index(structure, "table inet vpsguard {}")
+	posDelete := strings.Index(structure, "delete table inet vpsguard")
+	posCreate := strings.LastIndex(structure, "table inet vpsguard {")
+
+	if posEnsure == -1 {
+		t.Fatal("missing ensure-exists line")
+	}
+	if posDelete == -1 {
+		t.Fatal("missing delete table line")
+	}
+	if posEnsure >= posDelete {
+		t.Error("ensure-exists must come BEFORE delete")
+	}
+	if posDelete >= posCreate {
+		t.Error("delete must come BEFORE the actual table creation")
+	}
+}
+
+func TestTableNameCustom(t *testing.T) {
+	m := NewManager("my_custom_table", -5)
+	params := &RulesetParams{Mode: "blocklist"}
+	structure := m.GenerateStructure(params)
+
+	mustContain(t, structure, "table inet my_custom_table {}")
+	mustContain(t, structure, "delete table inet my_custom_table")
+	mustContain(t, structure, "priority -5;")
+}
+
+// --- Rule order tests ---
+
 func TestRuleOrderBlocklist(t *testing.T) {
 	m := NewManager("vpsguard", -1)
-	params := &RulesetParams{
-		Mode:    "blocklist",
-		GeoV4:   []netip.Prefix{p("1.0.0.0/8")},
-	}
-	ruleset := m.GenerateRuleset(params)
+	params := &RulesetParams{Mode: "blocklist"}
+	structure := m.GenerateStructure(params)
 
-	// Verify rule order within the chain
-	lines := strings.Split(ruleset, "\n")
-	var ruleLines []string
-	inChain := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, "chain input {") {
-			inChain = true
-			continue
-		}
-		if inChain && trimmed == "}" {
-			break
-		}
-		if inChain && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "type filter") {
-			ruleLines = append(ruleLines, trimmed)
-		}
-	}
+	ruleLines := extractChainRules(structure)
 
-	// Expected order:
-	// 1. ct state established,related accept
-	// 2. iif lo accept
-	// 3. whitelist accept
-	// 4. blocked drop
 	expectedOrder := []string{
 		"ct state established,related accept",
 		"iif lo accept",
@@ -184,28 +175,10 @@ func TestRuleOrderBlocklist(t *testing.T) {
 
 func TestRuleOrderAllowlist(t *testing.T) {
 	m := NewManager("vpsguard", -1)
-	params := &RulesetParams{
-		Mode:    "allowlist",
-		GeoV4:   []netip.Prefix{p("8.8.0.0/16")},
-	}
-	ruleset := m.GenerateRuleset(params)
+	params := &RulesetParams{Mode: "allowlist"}
+	structure := m.GenerateStructure(params)
 
-	lines := strings.Split(ruleset, "\n")
-	var ruleLines []string
-	inChain := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, "chain input {") {
-			inChain = true
-			continue
-		}
-		if inChain && trimmed == "}" {
-			break
-		}
-		if inChain && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "type filter") {
-			ruleLines = append(ruleLines, trimmed)
-		}
-	}
+	ruleLines := extractChainRules(structure)
 
 	expectedOrder := []string{
 		"ct state established,related accept",
@@ -227,44 +200,175 @@ func TestRuleOrderAllowlist(t *testing.T) {
 	}
 }
 
-func TestFormatPrefixes(t *testing.T) {
-	prefixes := []netip.Prefix{
-		p("1.0.0.0/24"),
-		p("2.0.0.0/16"),
-		p("10.0.0.0/8"),
+func TestEstablishedRelatedFirst(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{Mode: "blocklist"}
+	structure := m.GenerateStructure(params)
+
+	posEstablished := strings.Index(structure, "ct state established,related accept")
+	posBlocked := strings.Index(structure, "@blocked_v4 drop")
+
+	if posEstablished == -1 {
+		t.Fatal("missing established,related rule")
 	}
-	got := formatPrefixes(prefixes)
-	if !strings.Contains(got, "1.0.0.0/24") {
-		t.Errorf("missing prefix in formatted output: %s", got)
+	if posBlocked == -1 {
+		t.Fatal("missing blocked rule")
 	}
-	if !strings.Contains(got, "2.0.0.0/16") {
-		t.Errorf("missing prefix in formatted output: %s", got)
+	if posEstablished >= posBlocked {
+		t.Error("established,related rule must come BEFORE geo blocking rules")
 	}
 }
 
-func TestFormatPrefixesEmpty(t *testing.T) {
-	got := formatPrefixes(nil)
-	if got != "" {
-		t.Errorf("formatPrefixes(nil) = %q, want empty", got)
+// --- Element batch tests ---
+
+func TestGenerateElementBatchesSingleBatch(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{
+		Mode:  "blocklist",
+		GeoV4: []netip.Prefix{p("1.0.0.0/24"), p("2.0.0.0/16")},
+		GeoV6: []netip.Prefix{p("2001:200::/32")},
+	}
+
+	batches := m.GenerateElementBatches(params)
+	if len(batches) != 2 { // one for v4, one for v6
+		t.Fatalf("got %d batches, want 2", len(batches))
+	}
+
+	mustContain(t, batches[0], "add element inet vpsguard blocked_v4")
+	mustContain(t, batches[0], "1.0.0.0/24")
+	mustContain(t, batches[0], "2.0.0.0/16")
+
+	mustContain(t, batches[1], "add element inet vpsguard blocked_v6")
+	mustContain(t, batches[1], "2001:200::/32")
+}
+
+func TestGenerateElementBatchesAllowlist(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{
+		Mode:  "allowlist",
+		GeoV4: []netip.Prefix{p("8.8.8.0/24")},
+	}
+
+	batches := m.GenerateElementBatches(params)
+	if len(batches) != 1 {
+		t.Fatalf("got %d batches, want 1", len(batches))
+	}
+	mustContain(t, batches[0], "add element inet vpsguard allowed_v4")
+	mustNotContain(t, batches[0], "blocked_v4")
+}
+
+func TestGenerateElementBatchesEmpty(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{Mode: "blocklist"}
+
+	batches := m.GenerateElementBatches(params)
+	if len(batches) != 0 {
+		t.Errorf("got %d batches, want 0 for empty sets", len(batches))
 	}
 }
 
-func TestFormatPrefixesWrapping(t *testing.T) {
-	// Many prefixes should wrap to multiple lines
+func TestGenerateElementBatchesMultipleBatches(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+
+	// Create more prefixes than ElementBatchSize
 	var prefixes []netip.Prefix
-	for i := 0; i < 30; i++ {
-		prefixes = append(prefixes, p("10.0.0.0/8"))
+	for i := 0; i < ElementBatchSize+100; i++ {
+		a := byte(i / 256)
+		b := byte(i % 256)
+		prefixes = append(prefixes, netip.MustParsePrefix(
+			fmt.Sprintf("%d.%d.0.0/16", a+1, b),
+		))
 	}
-	got := formatPrefixes(prefixes)
-	if !strings.Contains(got, "\n") {
-		t.Error("expected wrapping for many prefixes")
+
+	params := &RulesetParams{
+		Mode:  "blocklist",
+		GeoV4: prefixes,
+	}
+
+	batches := m.GenerateElementBatches(params)
+
+	// Should have at least 2 batches for v4 (600 items / 500 batch = 2)
+	if len(batches) < 2 {
+		t.Fatalf("got %d batches, want >= 2 for %d prefixes", len(batches), len(prefixes))
+	}
+
+	// Every batch should reference the correct set
+	for i, batch := range batches {
+		mustContain(t, batch, "add element inet vpsguard blocked_v4")
+		if len(batch) == 0 {
+			t.Errorf("batch %d is empty", i)
+		}
 	}
 }
+
+func TestBatchElementsDirectly(t *testing.T) {
+	prefixes := []netip.Prefix{
+		p("10.0.0.0/8"),
+		p("172.16.0.0/12"),
+		p("192.168.0.0/16"),
+	}
+
+	batches := batchElements("mytable", "myset", prefixes)
+	if len(batches) != 1 {
+		t.Fatalf("got %d batches, want 1", len(batches))
+	}
+	mustContain(t, batches[0], "add element inet mytable myset")
+	mustContain(t, batches[0], "10.0.0.0/8")
+	mustContain(t, batches[0], "172.16.0.0/12")
+	mustContain(t, batches[0], "192.168.0.0/16")
+}
+
+func TestBatchElementsNil(t *testing.T) {
+	batches := batchElements("t", "s", nil)
+	if batches != nil {
+		t.Errorf("got %v, want nil", batches)
+	}
+}
+
+// --- Combined GenerateRuleset (for dry-run) ---
+
+func TestGenerateRulesetContainsBoth(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{
+		Mode:    "blocklist",
+		GeoV4:   []netip.Prefix{p("1.0.0.0/24")},
+		GeoV6:   []netip.Prefix{p("2001:200::/32")},
+		WhitelistV4: []netip.Prefix{p("10.0.0.0/8")},
+	}
+
+	ruleset := m.GenerateRuleset(params)
+
+	// Structure parts
+	mustContain(t, ruleset, "table inet vpsguard {}")
+	mustContain(t, ruleset, "chain input {")
+	mustContain(t, ruleset, "set blocked_v4 {")
+
+	// Whitelist inline
+	mustContain(t, ruleset, "10.0.0.0/8")
+
+	// Element batches
+	mustContain(t, ruleset, "add element inet vpsguard blocked_v4")
+	mustContain(t, ruleset, "1.0.0.0/24")
+	mustContain(t, ruleset, "add element inet vpsguard blocked_v6")
+	mustContain(t, ruleset, "2001:200::/32")
+}
+
+func TestNoAutoMerge(t *testing.T) {
+	m := NewManager("vpsguard", -1)
+	params := &RulesetParams{
+		Mode:  "blocklist",
+		GeoV4: []netip.Prefix{p("1.0.0.0/8")},
+	}
+	ruleset := m.GenerateRuleset(params)
+	mustNotContain(t, ruleset, "auto-merge")
+}
+
+// --- DryRun ---
 
 func TestDryRunToFile(t *testing.T) {
 	m := NewManager("vpsguard", -1)
 	params := &RulesetParams{
-		Mode: "blocklist",
+		Mode:  "blocklist",
 		GeoV4: []netip.Prefix{p("1.0.0.0/24")},
 	}
 
@@ -278,81 +382,56 @@ func TestDryRunToFile(t *testing.T) {
 		t.Fatalf("reading output: %v", err)
 	}
 	mustContain(t, string(data), "table inet vpsguard")
+	mustContain(t, string(data), "add element")
 }
 
-func TestTableNameCustom(t *testing.T) {
-	m := NewManager("my_custom_table", -5)
-	params := &RulesetParams{Mode: "blocklist"}
-	ruleset := m.GenerateRuleset(params)
+// --- FormatPrefixes ---
 
-	mustContain(t, ruleset, "table inet my_custom_table {}")
-	mustContain(t, ruleset, "delete table inet my_custom_table")
-	mustContain(t, ruleset, "priority -5;")
+func TestFormatPrefixes(t *testing.T) {
+	prefixes := []netip.Prefix{p("1.0.0.0/24"), p("2.0.0.0/16"), p("10.0.0.0/8")}
+	got := formatPrefixes(prefixes)
+	mustContain(t, got, "1.0.0.0/24")
+	mustContain(t, got, "2.0.0.0/16")
 }
 
-func TestEnsureTableExistsBeforeDelete(t *testing.T) {
-	// Verify the "ensure exists → delete → recreate" pattern
-	m := NewManager("vpsguard", -1)
-	params := &RulesetParams{Mode: "blocklist"}
-	ruleset := m.GenerateRuleset(params)
-
-	// The empty table declaration must come BEFORE the delete
-	posEnsure := strings.Index(ruleset, "table inet vpsguard {}")
-	posDelete := strings.Index(ruleset, "delete table inet vpsguard")
-	posCreate := strings.LastIndex(ruleset, "table inet vpsguard {")
-
-	if posEnsure == -1 {
-		t.Fatal("missing ensure-exists line: table inet vpsguard {}")
-	}
-	if posDelete == -1 {
-		t.Fatal("missing delete table line")
-	}
-	if posEnsure >= posDelete {
-		t.Error("ensure-exists must come BEFORE delete")
-	}
-	if posDelete >= posCreate {
-		t.Error("delete must come BEFORE the actual table creation")
+func TestFormatPrefixesEmpty(t *testing.T) {
+	if got := formatPrefixes(nil); got != "" {
+		t.Errorf("formatPrefixes(nil) = %q, want empty", got)
 	}
 }
 
-func TestNoAutoMerge(t *testing.T) {
-	// auto-merge is omitted for older nftables/kernel compatibility
-	m := NewManager("vpsguard", -1)
-	params := &RulesetParams{
-		Mode:  "blocklist",
-		GeoV4: []netip.Prefix{p("1.0.0.0/8")},
+func TestFormatPrefixesWrapping(t *testing.T) {
+	var prefixes []netip.Prefix
+	for i := 0; i < 30; i++ {
+		prefixes = append(prefixes, p("10.0.0.0/8"))
 	}
-	ruleset := m.GenerateRuleset(params)
-	mustNotContain(t, ruleset, "auto-merge")
-}
-
-func TestEstablishedRelatedFirst(t *testing.T) {
-	// This test verifies requirement 3:
-	// VPS-initiated outbound connections get return traffic through established,related
-	// which is the FIRST rule in the chain, before any geo blocking
-	m := NewManager("vpsguard", -1)
-	params := &RulesetParams{
-		Mode:  "blocklist",
-		GeoV4: []netip.Prefix{p("1.0.0.0/8")},
-	}
-	ruleset := m.GenerateRuleset(params)
-
-	// Find positions
-	posEstablished := strings.Index(ruleset, "ct state established,related accept")
-	posBlocked := strings.Index(ruleset, "@blocked_v4 drop")
-
-	if posEstablished == -1 {
-		t.Fatal("missing established,related rule")
-	}
-	if posBlocked == -1 {
-		t.Fatal("missing blocked rule")
-	}
-	if posEstablished >= posBlocked {
-		t.Error("established,related rule must come BEFORE geo blocking rules")
+	got := formatPrefixes(prefixes)
+	if !strings.Contains(got, "\n") {
+		t.Error("expected wrapping for many prefixes")
 	}
 }
 
-// Helpers
+// --- Helpers ---
+
+func extractChainRules(s string) []string {
+	lines := strings.Split(s, "\n")
+	var ruleLines []string
+	inChain := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "chain input {") {
+			inChain = true
+			continue
+		}
+		if inChain && trimmed == "}" {
+			break
+		}
+		if inChain && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "type filter") {
+			ruleLines = append(ruleLines, trimmed)
+		}
+	}
+	return ruleLines
+}
 
 func mustContain(t *testing.T, s, substr string) {
 	t.Helper()
