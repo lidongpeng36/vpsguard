@@ -91,13 +91,6 @@ func runCheck(configPath string) {
 	}
 	fmt.Printf("  Whitelist (parsed): %d prefixes\n", len(prefixes))
 
-	// Check nft binary
-	if _, err := os.Stat("/usr/sbin/nft"); err != nil {
-		if _, err2 := os.Stat("/sbin/nft"); err2 != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: nft binary not found\n")
-		}
-	}
-
 	fmt.Println("\nConfig OK")
 }
 

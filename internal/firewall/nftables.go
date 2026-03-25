@@ -1,33 +1,34 @@
 // Package firewall generates and applies nftables rulesets for VPSGuard.
 //
-// The ruleset is applied in two phases to work around kernel netlink message
-// size limits when loading large GeoIP sets (40k+ CIDRs):
-//
-//   Phase 1: Create table structure (empty sets + chain rules)
-//   Phase 2: Populate sets in batches via "add element" commands
+// The human-readable ruleset text is still generated for dry-run output, but
+// live changes are applied through github.com/google/nftables over netlink.
 package firewall
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 )
 
-// ElementBatchSize controls how many CIDRs are loaded per nft add element call.
-// 500 is conservative enough for any kernel netlink buffer size.
+// ElementBatchSize controls how many CIDRs are loaded per netlink batch.
+// 500 is conservative enough for large GeoIP sets.
 const ElementBatchSize = 500
+
+const (
+	reg1 = 1
+)
 
 // Manager handles nftables rule generation and application.
 type Manager struct {
 	TableName string
 	Priority  int
-
-	// NftBinary is the path to the nft binary. Defaults to "nft".
-	NftBinary string
 }
 
 // NewManager creates a Manager with sensible defaults.
@@ -35,7 +36,6 @@ func NewManager(tableName string, priority int) *Manager {
 	return &Manager{
 		TableName: tableName,
 		Priority:  priority,
-		NftBinary: "nft",
 	}
 }
 
@@ -51,7 +51,6 @@ type RulesetParams struct {
 // --- Phase 1: Table structure (empty sets + chain) ---
 
 // GenerateStructure produces the nftables table with empty sets and chain rules.
-// This is small and always succeeds with nft -f.
 func (m *Manager) GenerateStructure(params *RulesetParams) string {
 	var buf bytes.Buffer
 
@@ -64,11 +63,9 @@ func (m *Manager) GenerateStructure(params *RulesetParams) string {
 
 	fmt.Fprintf(&buf, "table inet %s {\n", m.TableName)
 
-	// Whitelist sets — small, inline elements are fine
 	m.writeSet(&buf, "whitelist_v4", "ipv4_addr", params.WhitelistV4)
 	m.writeSet(&buf, "whitelist_v6", "ipv6_addr", params.WhitelistV6)
 
-	// Geo sets — empty here, populated in phase 2
 	if params.Mode == "blocklist" {
 		m.writeEmptySet(&buf, "blocked_v4", "ipv4_addr")
 		m.writeEmptySet(&buf, "blocked_v6", "ipv6_addr")
@@ -133,17 +130,13 @@ func batchElements(table, set string, prefixes []netip.Prefix) []string {
 
 // --- Combined: GenerateRuleset for dry-run / display ---
 
-// GenerateRuleset produces the complete ruleset as a single string (for dry-run display).
-// Note: this single-file format may fail with nft -f for large sets; Apply() uses
-// the two-phase approach instead.
+// GenerateRuleset produces the complete ruleset as a single string.
 func (m *Manager) GenerateRuleset(params *RulesetParams) string {
 	var buf bytes.Buffer
 
-	// Phase 1
 	buf.WriteString(m.GenerateStructure(params))
 	buf.WriteString("\n")
 
-	// Phase 2
 	for _, batch := range m.GenerateElementBatches(params) {
 		buf.WriteString(batch)
 	}
@@ -226,80 +219,312 @@ func formatPrefixes(prefixes []netip.Prefix) string {
 	return buf.String()
 }
 
-// --- Apply (two-phase) ---
+// --- Apply (netlink) ---
 
-// Apply creates the table structure, then populates sets in batches.
+// Apply recreates the managed table, then populates large GeoIP sets in batches.
 func (m *Manager) Apply(params *RulesetParams) error {
-	// Phase 1: structure
-	structure := m.GenerateStructure(params)
-	if err := m.nftExecString(structure); err != nil {
-		return fmt.Errorf("applying table structure: %w", err)
+	conn := &nftables.Conn{}
+	table := &nftables.Table{
+		Family: nftables.TableFamilyINet,
+		Name:   m.TableName,
 	}
 
-	// Phase 2: elements in batches
-	batches := m.GenerateElementBatches(params)
-	for i, batch := range batches {
-		if err := m.nftExecString(batch); err != nil {
-			return fmt.Errorf("loading element batch %d/%d: %w", i+1, len(batches), err)
+	if existing, err := conn.ListTableOfFamily(m.TableName, nftables.TableFamilyINet); err == nil && existing != nil {
+		conn.DelTable(existing)
+	}
+
+	table = conn.AddTable(table)
+
+	chain := conn.AddChain(&nftables.Chain{
+		Name:     "input",
+		Table:    table,
+		Type:     nftables.ChainTypeFilter,
+		Hooknum:  nftables.ChainHookInput,
+		Priority: nftables.ChainPriorityRef(nftables.ChainPriority(m.Priority)),
+		Policy:   chainPolicyRef(nftables.ChainPolicyAccept),
+	})
+
+	if err := m.addManagedSets(conn, table, params); err != nil {
+		return fmt.Errorf("creating sets: %w", err)
+	}
+
+	m.addRules(conn, table, chain, params.Mode)
+
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("flushing table structure: %w", err)
+	}
+
+	if err := m.populateGeoSets(params); err != nil {
+		return fmt.Errorf("loading GeoIP sets: %w", err)
+	}
+
+	return nil
+}
+
+func (m *Manager) addManagedSets(conn *nftables.Conn, table *nftables.Table, params *RulesetParams) error {
+	whitelistV4 := newAddrSet(table, "whitelist_v4", nftables.TypeIPAddr)
+	whitelistV6 := newAddrSet(table, "whitelist_v6", nftables.TypeIP6Addr)
+	if err := conn.AddSet(whitelistV4, prefixesToElements(params.WhitelistV4)); err != nil {
+		return err
+	}
+	if err := conn.AddSet(whitelistV6, prefixesToElements(params.WhitelistV6)); err != nil {
+		return err
+	}
+
+	geoV4Name := "blocked_v4"
+	geoV6Name := "blocked_v6"
+	if params.Mode == "allowlist" {
+		geoV4Name = "allowed_v4"
+		geoV6Name = "allowed_v6"
+	}
+
+	if err := conn.AddSet(newAddrSet(table, geoV4Name, nftables.TypeIPAddr), nil); err != nil {
+		return err
+	}
+	if err := conn.AddSet(newAddrSet(table, geoV6Name, nftables.TypeIP6Addr), nil); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) populateGeoSets(params *RulesetParams) error {
+	geoV4Name := "blocked_v4"
+	geoV6Name := "blocked_v6"
+	if params.Mode == "allowlist" {
+		geoV4Name = "allowed_v4"
+		geoV6Name = "allowed_v6"
+	}
+
+	if err := m.addSetElementsInBatches(geoV4Name, nftables.TypeIPAddr, params.GeoV4); err != nil {
+		return err
+	}
+	if err := m.addSetElementsInBatches(geoV6Name, nftables.TypeIP6Addr, params.GeoV6); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) addSetElementsInBatches(name string, dataType nftables.SetDatatype, prefixes []netip.Prefix) error {
+	if len(prefixes) == 0 {
+		return nil
+	}
+
+	table := &nftables.Table{
+		Family: nftables.TableFamilyINet,
+		Name:   m.TableName,
+	}
+
+	for i := 0; i < len(prefixes); i += ElementBatchSize {
+		end := i + ElementBatchSize
+		if end > len(prefixes) {
+			end = len(prefixes)
+		}
+
+		conn := &nftables.Conn{}
+		set, err := conn.GetSetByName(table, name)
+		if err != nil {
+			return fmt.Errorf("looking up set %s: %w", name, err)
+		}
+		set.KeyType = dataType
+		set.Interval = true
+
+		if err := conn.SetAddElements(set, prefixesToElements(prefixes[i:end])); err != nil {
+			return fmt.Errorf("queueing batch %d-%d for %s: %w", i, end, name, err)
+		}
+		if err := conn.Flush(); err != nil {
+			return fmt.Errorf("flushing batch %d-%d for %s: %w", i, end, name, err)
 		}
 	}
 
 	return nil
 }
 
-// nftExecString writes content to a temp file and runs nft -f on it.
-func (m *Manager) nftExecString(content string) error {
-	tmpFile, err := os.CreateTemp("", "vpsguard-*.nft")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+func (m *Manager) addRules(conn *nftables.Conn, table *nftables.Table, chain *nftables.Chain, mode string) {
+	conn.AddRule(ruleEstablishedRelated(table, chain))
+	conn.AddRule(ruleLoopback(table, chain))
+	conn.AddRule(ruleLookupV4(table, chain, "whitelist_v4", nil, expr.VerdictAccept))
+	conn.AddRule(ruleLookupV6(table, chain, "whitelist_v6", nil, expr.VerdictAccept))
 
-	if _, err := tmpFile.WriteString(content); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("writing temp file: %w", err)
+	if mode == "blocklist" {
+		conn.AddRule(ruleLookupV4(table, chain, "blocked_v4", nil, expr.VerdictDrop))
+		conn.AddRule(ruleLookupV6(table, chain, "blocked_v6", nil, expr.VerdictDrop))
+		return
 	}
-	tmpFile.Close()
 
-	cmd := exec.Command(m.NftBinary, "-f", tmpPath)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("nft -f failed: %w: %s", err, stderr.String())
+	newState := ctStateMatchExprs(expr.CtStateBitNEW)
+	conn.AddRule(ruleLookupV4(table, chain, "allowed_v4", newState, expr.VerdictAccept))
+	conn.AddRule(ruleLookupV6(table, chain, "allowed_v6", newState, expr.VerdictAccept))
+	conn.AddRule(ruleWithExprs(table, chain, append(newState, verdictExpr(expr.VerdictDrop))...))
+}
+
+func newAddrSet(table *nftables.Table, name string, dataType nftables.SetDatatype) *nftables.Set {
+	return &nftables.Set{
+		Table:    table,
+		Name:     name,
+		KeyType:  dataType,
+		Interval: true,
 	}
-	return nil
+}
+
+func ruleEstablishedRelated(table *nftables.Table, chain *nftables.Chain) *nftables.Rule {
+	mask := expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED
+	exprs := append(ctStateMatchExprs(mask), verdictExpr(expr.VerdictAccept))
+	return ruleWithExprs(table, chain, exprs...)
+}
+
+func ruleLoopback(table *nftables.Table, chain *nftables.Chain) *nftables.Rule {
+	return ruleWithExprs(table, chain,
+		&expr.Meta{
+			Key:      expr.MetaKeyIIFNAME,
+			Register: reg1,
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: reg1,
+			Data:     ifName("lo"),
+		},
+		verdictExpr(expr.VerdictAccept),
+	)
+}
+
+func ruleLookupV4(table *nftables.Table, chain *nftables.Chain, setName string, prefix []expr.Any, verdict expr.VerdictKind) *nftables.Rule {
+	exprs := make([]expr.Any, 0, len(prefix)+3)
+	exprs = append(exprs, prefix...)
+	exprs = append(exprs,
+		&expr.Payload{
+			OperationType: expr.PayloadLoad,
+			DestRegister:  reg1,
+			Base:          expr.PayloadBaseNetworkHeader,
+			Offset:        12,
+			Len:           4,
+		},
+		&expr.Lookup{
+			SourceRegister: reg1,
+			SetName:        setName,
+		},
+		verdictExpr(verdict),
+	)
+	return ruleWithExprs(table, chain, exprs...)
+}
+
+func ruleLookupV6(table *nftables.Table, chain *nftables.Chain, setName string, prefix []expr.Any, verdict expr.VerdictKind) *nftables.Rule {
+	exprs := make([]expr.Any, 0, len(prefix)+3)
+	exprs = append(exprs, prefix...)
+	exprs = append(exprs,
+		&expr.Payload{
+			OperationType: expr.PayloadLoad,
+			DestRegister:  reg1,
+			Base:          expr.PayloadBaseNetworkHeader,
+			Offset:        8,
+			Len:           16,
+		},
+		&expr.Lookup{
+			SourceRegister: reg1,
+			SetName:        setName,
+		},
+		verdictExpr(verdict),
+	)
+	return ruleWithExprs(table, chain, exprs...)
+}
+
+func ruleWithExprs(table *nftables.Table, chain *nftables.Chain, exprs ...expr.Any) *nftables.Rule {
+	return &nftables.Rule{
+		Table: table,
+		Chain: chain,
+		Exprs: exprs,
+	}
+}
+
+func verdictExpr(kind expr.VerdictKind) *expr.Verdict {
+	return &expr.Verdict{Kind: kind}
+}
+
+func ctStateMatchExprs(mask uint32) []expr.Any {
+	return []expr.Any{
+		&expr.Ct{
+			Register: reg1,
+			Key:      expr.CtKeySTATE,
+		},
+		&expr.Bitwise{
+			SourceRegister: reg1,
+			DestRegister:   reg1,
+			Len:            4,
+			Mask:           nativeUint32(mask),
+			Xor:            nativeUint32(0),
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpNeq,
+			Register: reg1,
+			Data:     nativeUint32(0),
+		},
+	}
+}
+
+func ifName(name string) []byte {
+	b := make([]byte, 16)
+	copy(b, name)
+	return b
+}
+
+func chainPolicyRef(p nftables.ChainPolicy) *nftables.ChainPolicy {
+	return &p
 }
 
 // Cleanup removes the VPSGuard table from nftables.
 func (m *Manager) Cleanup() error {
-	cmd := exec.Command(m.NftBinary, "delete", "table", "inet", m.TableName)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if strings.Contains(stderr.String(), "No such file or directory") ||
-			strings.Contains(stderr.String(), "does not exist") {
+	conn := &nftables.Conn{}
+
+	table, err := conn.ListTableOfFamily(m.TableName, nftables.TableFamilyINet)
+	if err != nil {
+		if isNotFoundErr(err) {
 			return nil
 		}
-		return fmt.Errorf("deleting table: %w: %s", err, stderr.String())
+		return fmt.Errorf("listing table: %w", err)
+	}
+	if table == nil {
+		return nil
+	}
+
+	conn.DelTable(table)
+	if err := conn.Flush(); err != nil && !isNotFoundErr(err) {
+		return fmt.Errorf("deleting table: %w", err)
 	}
 	return nil
 }
 
 // Verify checks that the VPSGuard table exists and has the expected chain.
 func (m *Manager) Verify() error {
-	cmd := exec.Command(m.NftBinary, "list", "table", "inet", m.TableName)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("listing table: %w: %s", err, stderr.String())
+	conn := &nftables.Conn{}
+
+	table, err := conn.ListTableOfFamily(m.TableName, nftables.TableFamilyINet)
+	if err != nil {
+		return fmt.Errorf("listing table: %w", err)
 	}
-	output := stdout.String()
-	if !strings.Contains(output, "chain input") {
+	if table == nil {
+		return fmt.Errorf("table %s not found", m.TableName)
+	}
+
+	chain, err := conn.ListChain(table, "input")
+	if err != nil {
+		return fmt.Errorf("listing input chain: %w", err)
+	}
+	if chain == nil {
 		return fmt.Errorf("table %s exists but missing input chain", m.TableName)
 	}
+
 	return nil
+}
+
+func isNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such file") || strings.Contains(msg, "not found")
 }
 
 // DryRun generates the full ruleset and writes it to the given path (or stdout).

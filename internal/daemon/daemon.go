@@ -91,13 +91,6 @@ func (d *Daemon) checkPrerequisites() error {
 		return fmt.Errorf("vpsguard must run as root (need CAP_NET_ADMIN for nftables)")
 	}
 
-	// Check nft binary exists
-	if _, err := os.Stat("/usr/sbin/nft"); err != nil {
-		if _, err2 := os.Stat("/sbin/nft"); err2 != nil {
-			return fmt.Errorf("nft binary not found: install nftables (apt install nftables)")
-		}
-	}
-
 	return nil
 }
 
