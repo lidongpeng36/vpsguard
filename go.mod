@@ -4,6 +4,7 @@ go 1.22.0
 
 require (
 	github.com/google/nftables v0.3.0
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	gopkg.in/yaml.v3 v3.0.1
 )
 

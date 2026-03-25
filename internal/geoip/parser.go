@@ -169,6 +169,12 @@ func ParseBlocks(r io.Reader, locations map[string]string, targetCountries map[s
 //   - GeoLite2-Country-Blocks-IPv4.csv
 //   - GeoLite2-Country-Blocks-IPv6.csv
 func LoadFromDir(dir string, countries []string) (*CountryCIDRs, error) {
+	if cidrs, ok, err := loadOptimizedFromCache(dir, countries); err != nil {
+		return nil, err
+	} else if ok {
+		return cidrs, nil
+	}
+
 	// Build target set
 	var targetSet map[string]bool
 	if countries != nil {
@@ -218,7 +224,15 @@ func LoadFromDir(dir string, countries []string) (*CountryCIDRs, error) {
 	}
 	result.V6 = v6Blocks
 
-	return result, nil
+	optimized, err := optimizeCountryCIDRs(result)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveOptimizedToCache(dir, countries, optimized); err != nil {
+		return nil, err
+	}
+
+	return optimized, nil
 }
 
 // Stats returns a summary of CIDR counts per country.
