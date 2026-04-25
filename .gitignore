@@ -3,3 +3,5 @@ coverage.out
 coverage.html
 *.nft
 /tmp/
+.omx/
+.claude/
